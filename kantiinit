@@ -179,7 +179,7 @@ def get_sorter(sorter):
 def print_tiled_boxes(restaurants, menus, menu_date,
                       min_box_width, sorter):
     term_width = shutil.get_terminal_size(fallback=(80, 24)).columns
-    min_spacing = 3
+    min_spacing = 1
 
     max_columns = max(1, term_width // min_box_width)
     box_width = max(min_box_width, term_width // max_columns)
