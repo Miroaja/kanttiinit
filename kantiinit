@@ -1,0 +1,349 @@
+#!/bin/python
+from difflib import SequenceMatcher
+from io import StringIO
+import sys
+import pydoc
+import re
+from datetime import date, datetime
+import requests
+import shutil
+from textwrap import wrap
+import argparse
+
+restaurants_base_url = \
+    "https://kitchen.kanttiinit.fi/restaurants?lang=fi"
+
+menus_base_url = "https://kitchen.kanttiinit.fi/menus"
+areas_url = "https://kitchen.kanttiinit.fi/areas?idsOnly=1&lang=fi"
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+FG_CYAN = "\033[36m"
+FG_YELLOW = "\033[33m"
+FG_GREEN = "\033[32m"
+FG_MAGENTA = "\033[35m"
+FG_RED = "\033[31m"
+FG_BLUE = "\033[34m"
+
+
+def similar(a, b):
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def fetch_areas(search):
+    response = requests.get(areas_url, timeout=10)
+    response.raise_for_status()
+
+    data = response.json()
+
+    matches = set()
+    for area in search:
+        item = max([
+            (item, similarity)
+            for item in data
+            if (similarity := similar(area.lower(), item["name"]
+                                      .lower())) > 0.3
+        ], key=lambda r: r[1], default=({}, None))
+        if item is not None:
+            matches.add(item[0].get("id", ""))
+
+    # this is theoretically unreachable but worth as a fallback
+    return [item for item in data if item["name"] == "Otaniemi"] \
+        if len(search) == 0 else \
+        [area for area in data if area["id"] in matches]
+
+
+def fetch_restaurants(search, ids):
+    response = requests.get(
+        f"{restaurants_base_url}"
+        f"&ids={",".join(ids)}", timeout=10)
+    response.raise_for_status()
+
+    data = response.json()
+
+    matches = set()
+    for restaurant in search:
+        item = max([
+            (item, similarity)
+            for item in data
+            if (similarity := similar(restaurant.lower(), item["name"]
+                                      .lower())) > 0.2
+        ], key=lambda r: r[1], default=({}, None))
+        if item is not None:
+            matches.add(item[0].get("id", ""))
+    return data if len(search) == 0 else \
+        [restaurant for restaurant in data if restaurant["id"] in matches]
+
+
+def fetch_menus(restaurant_ids, menu_date, language):
+    restaurants_param = ",".join(str(rid) for rid in restaurant_ids)
+    menus_url = (
+        f"{menus_base_url}"
+        f"?lang={language}&restaurants={restaurants_param}&days={menu_date}"
+    )
+    response = requests.get(menus_url, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def is_restaurant_open_now(restaurant):
+    opening_hours = restaurant.get("openingHours")
+    if not opening_hours:
+        return False
+
+    weekday = datetime.now().weekday()
+    today_hours = opening_hours[weekday]
+
+    if not today_hours:
+        return False
+
+    try:
+        start_str, end_str = [t.strip() for t in today_hours.split("-")]
+        now = datetime.now().time()
+        start_time = datetime.strptime(start_str, "%H:%M").time()
+        end_time = datetime.strptime(end_str, "%H:%M").time()
+        return start_time <= now <= end_time
+    except Exception:
+        return False
+
+
+def build_box_lines(restaurant, menus, menu_date, box_width):
+    inner_width = box_width - 2
+    lines = []
+
+    name = wrap(restaurant["name"] + " (€€)", inner_width)
+    name[-1] = name[-1][:-4]
+    address = wrap(restaurant.get("address", ""), inner_width)
+    restaurant_id = str(restaurant["id"])
+    price_category = restaurant.get("priceCategory", "")
+    price = "€" if price_category == "student" else (
+        "€€" if price_category == "studentPremium" else "?")
+
+    is_open = is_restaurant_open_now(restaurant)
+    status = f"{FG_GREEN}OPEN NOW{
+        RESET}" if is_open else f"{FG_RED}CLOSED{RESET}"
+    lines.insert(0, status)
+
+    today_index = date.fromisoformat(menu_date).weekday()
+    opening_hours_list = restaurant.get("openingHours", [])
+    opening_hours = "Closed"  # default
+    if today_index < len(opening_hours_list) \
+            and opening_hours_list[today_index]:
+        opening_hours = opening_hours_list[today_index]
+
+    for segment in name:
+        lines.append(f"{BOLD}{FG_BLUE if is_open else FG_CYAN}{
+                     segment}{RESET}")
+    lines[-1] += f"{FG_GREEN if price == "$" else FG_MAGENTA}({price}){RESET}"
+
+    lines.append(f"{FG_MAGENTA}Hours: {opening_hours}{RESET}")
+
+    for segment in address:
+        lines.append(f"{FG_YELLOW}{segment}{RESET}")
+
+    lines.append("─" * inner_width)
+
+    daily_menu = menus.get(restaurant_id, {}).get(menu_date, [])
+    if not daily_menu:
+        lines.append("No menu today")
+        return name, lines
+
+    for item in daily_menu:
+        title = f"• {item['title']}"
+        wrapped_title = wrap(title, inner_width - 1)
+        lines.extend(wrapped_title)
+
+        if item.get("properties"):
+            props = ", ".join(item["properties"])
+            lines.append(f"{FG_GREEN}({props}){RESET}")
+
+        lines.append("")
+
+    return name, lines
+
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def visible_len(s):
+    return len(ANSI_ESCAPE.sub("", s))
+
+
+def get_sorter(sorter):
+    match sorter:
+        case "alpha": return (lambda nm: nm[0], False)
+        case "len": return (lambda nm: len(nm[1]), True)
+        case "none": return None
+
+
+def print_tiled_boxes(restaurants, menus, menu_date,
+                      min_box_width, sorter):
+    term_width = shutil.get_terminal_size(fallback=(80, 24)).columns
+    min_spacing = 3
+
+    max_columns = max(1, term_width // min_box_width)
+    box_width = max(min_box_width, term_width // max_columns)
+    max_spacing = max(min_spacing, (term_width -
+                                    box_width * max_columns) // max_columns)
+
+    columns = max(1, term_width // (box_width + max_spacing))
+    spacing = max(min_spacing, (term_width -
+                                box_width * columns) // columns)
+    left_spacing = (
+        term_width - columns * (box_width + spacing) + spacing) // 2
+
+    boxes_names = [build_box_lines(r, menus, menu_date, box_width)
+                   for r in restaurants]
+
+    sorter_lambda, reverse = get_sorter(sorter) or (None, None)
+    if sorter_lambda is not None:
+        boxes_names.sort(key=sorter_lambda, reverse=reverse)
+
+    _, boxes = list(zip(*boxes_names))
+    rows = [boxes[i:i + columns] for i in range(0, len(boxes), columns)]
+
+    for row in rows:
+        max_height = max(len(box) for box in row)
+        padded_boxes = []
+        for box in row:
+            pad_lines = max_height - len(box)
+            padded_box = box + [""] * pad_lines
+            padded_boxes.append(padded_box)
+
+        top_border = (" " * spacing).join("┌" + "─" *
+                                                (box_width - 2)
+                                          + "┐" for _ in padded_boxes)
+
+        print(" " * left_spacing, end="")
+        print(top_border)
+
+        for i in range(max_height):
+            line_parts = []
+            for box in padded_boxes:
+                content = box[i]
+                pad = box_width - 2 - visible_len(content)
+                content = content + " " * pad
+                line_parts.append(f"│{content}│")
+            print(" " * left_spacing, end="")
+            print((" " * spacing).join(line_parts))
+
+        print(" " * left_spacing, end="")
+        bottom_border = (" " * spacing).join("└" + "─" *
+                                                   (box_width - 2)
+                                             + "┘" for _ in padded_boxes)
+        print(bottom_border)
+        print()
+
+
+class Capturing(list):
+    def __enter__(self):
+        self._stdout = sys.stdout
+        sys.stdout = self._stringio = StringIO()
+        return self
+
+    def __exit__(self, *args):
+        self.extend(self._stringio.getvalue().splitlines())
+        del self._stringio
+        sys.stdout = self._stdout
+
+
+def min_int(arg):
+    try:
+        f = int(arg)
+    except ValueError:
+        raise argparse.ArgumentTypeError("argument must be an integer value")
+    if f < 30:
+        raise argparse.ArgumentTypeError(
+            "argument must be >= 30")
+    return f
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog='kanttiinit',
+        description='Fetches and prints out restaurant menus for the day'
+        'from kantiinit.fi with fancy formatting',
+        epilog='if you find a bug somewhere in here idk what to tell you',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        '-l', '--lang', help="Menu language [en/fi]",
+        default="fi", nargs="?", type=str, choices=["en", "fi"])
+    parser.add_argument(
+        '-w', '--width', help="Minimum box width, "
+        "cannot be set below 30",
+        default=35, nargs="?", type=min_int)
+    parser.add_argument(
+        '-p', '--pager', help="Use the system pager to view the output",
+        action='store_true')
+    parser.add_argument(
+        '-s', '--sort', help="Sort the restaurants",
+        choices=["alpha", "none", "len"], default="none")
+    parser.add_argument(
+        '-c', '--no_color', help="Disable colored output",
+        action='store_true')
+    parser.add_argument(
+        '-r', '--restaurants',
+        help="Display data from specific restaurants only",
+        nargs="*", default=[])
+    parser.add_argument(
+        '-a', '--areas',
+        help="What areas to pull menus from",
+        nargs="+",
+        default=["Otaniemi"])
+    args = parser.parse_args()
+
+    if args.no_color:  # this is kinda evil, but simple
+        global RESET
+        global BOLD
+        global FG_CYAN
+        global FG_YELLOW
+        global FG_GREEN
+        global FG_MAGENTA
+        global FG_RED
+        global FG_BLUE
+
+        RESET = ""
+        BOLD = ""
+        FG_CYAN = ""
+        FG_YELLOW = ""
+        FG_GREEN = ""
+        FG_MAGENTA = ""
+        FG_RED = ""
+        FG_BLUE = ""
+
+    today = date.today().isoformat()
+
+    areas = fetch_areas(set(args.areas))
+    if len(areas) == 0:
+        print("Nothing here but us chickens.")
+        exit()
+
+    with Capturing() as output:
+        for area in areas:
+            area_restaurant_ids = [str(r) for r in area["restaurants"]]
+            restaurants = fetch_restaurants(
+                set(args.restaurants), area_restaurant_ids)
+
+            if len(restaurants) == 0 and len(areas) == 1:
+                print("Nothing here but us chickens.")
+                exit()
+            elif len(restaurants) == 0:
+                print(f"\t{FG_RED}No restaurants with those names found in {
+                      area["name"]} :|{RESET}")
+                continue
+            print(f"{BOLD}{FG_BLUE}\tRestaurants in {area["name"]}:{RESET}")
+
+            restaurant_ids = [r["id"] for r in restaurants]
+            menus = fetch_menus(restaurant_ids, today, args.lang)
+
+            print_tiled_boxes(restaurants, menus, today,
+                              max(30, args.width), args.sort)
+
+    if args.pager:
+        pydoc.pager("\n".join(output))
+    else:
+        print("\n".join(output))
+
+
+if __name__ == "__main__":
+    main()
