@@ -263,7 +263,9 @@ def main():
         prog='kanttiinit',
         description='Fetches and prints out restaurant menus for the day'
         'from kantiinit.fi with fancy formatting',
-        epilog='if you find a bug somewhere in here idk what to tell you',
+        epilog='if you find a bug, make an issue at'
+        'https://github.com/Miroaja/kanttiinit,'
+        'I don\'t guarantee I\'ll look at it',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
         '-l', '--lang', help="Menu language [en/fi]",
@@ -337,7 +339,7 @@ def main():
             menus = fetch_menus(restaurant_ids, today, args.lang)
 
             print_tiled_boxes(restaurants, menus, today,
-                              max(30, args.width), args.sort)
+                              args.width, args.sort)
 
     if args.pager:
         pydoc.pager("\n".join(output))
