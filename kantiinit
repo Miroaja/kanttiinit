@@ -132,9 +132,9 @@ def build_box_lines(restaurant, menus, menu_date, box_width):
         opening_hours = opening_hours_list[today_index]
 
     for segment in name:
-        lines.append(f"{BOLD}{FG_BLUE if is_open else FG_CYAN}{
+        lines.append(f"{BOLD}{FG_GREEN if is_open else FG_RED}{
                      segment}{RESET}")
-    lines[-1] += f"{FG_GREEN if price == "$" else FG_MAGENTA}({price}){RESET}"
+    lines[-1] += f"{FG_BLUE if price == "$" else FG_MAGENTA}({price}){RESET}"
 
     lines.append(f"{FG_MAGENTA}Hours: {opening_hours}{RESET}")
 
