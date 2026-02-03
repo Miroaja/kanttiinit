@@ -147,7 +147,7 @@ def build_box_lines(restaurant, menus, menu_date, box_width):
     lines.append("─" * inner_width)
     daily_menu = menus.get(restaurant_id, {}).get(menu_date, [])
     if not daily_menu:
-        lines.append("No menu today")
+        lines.extend(wrap("No menu today", inner_width - 1))
         return name, lines
 
     for item in daily_menu:
