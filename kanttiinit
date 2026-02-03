@@ -30,22 +30,28 @@ def similar(a, b):
     return SequenceMatcher(None, a, b).ratio()
 
 
+def find_matches(data, search, threshold, key, to):
+    matches = set()
+    for point in search:
+        item = max([
+            (item, similarity)
+            for item in data
+            if (similarity := similar(point.lower(), key(item)
+                                      .lower())) > threshold
+        ], key=lambda r: r[1], default=({}, None))
+        if item[1] is not None:
+            matches.add(to(item[0]))
+    return matches
+
+
 def fetch_areas(search):
     response = requests.get(areas_url, timeout=10)
     response.raise_for_status()
 
     data = response.json()
 
-    matches = set()
-    for area in search:
-        item = max([
-            (item, similarity)
-            for item in data
-            if (similarity := similar(area.lower(), item["name"]
-                                      .lower())) > 0.3
-        ], key=lambda r: r[1], default=({}, None))
-        if item is not None:
-            matches.add(item[0].get("id", ""))
+    matches = find_matches(
+        data, search, 0.3, lambda i: i["name"], lambda r: r.get("id", ""))
 
     # this is theoretically unreachable but worth as a fallback
     return [item for item in data if item["name"] == "Otaniemi"] \
@@ -61,16 +67,9 @@ def fetch_restaurants(search, ids):
 
     data = response.json()
 
-    matches = set()
-    for restaurant in search:
-        item = max([
-            (item, similarity)
-            for item in data
-            if (similarity := similar(restaurant.lower(), item["name"]
-                                      .lower())) > 0.2
-        ], key=lambda r: r[1], default=({}, None))
-        if item is not None:
-            matches.add(item[0].get("id", ""))
+    matches = find_matches(
+        data, search, 0.1, lambda i: i["name"], lambda r: r.get("id", ""))
+
     return data if len(search) == 0 else \
         [restaurant for restaurant in data if restaurant["id"] in matches]
 
@@ -131,18 +130,17 @@ def build_box_lines(restaurant, menus, menu_date, box_width):
             and opening_hours_list[today_index]:
         opening_hours = opening_hours_list[today_index]
 
-    for segment in name:
-        lines.append(f"{BOLD}{FG_GREEN if is_open else FG_RED}{
-                     segment}{RESET}")
+    lines.extend(f"{BOLD}{FG_GREEN if is_open else FG_RED}{
+                 s}{RESET}" for s in name)
+
     lines[-1] += f"{FG_BLUE if price == "$" else FG_MAGENTA}({price}){RESET}"
+    lines.extend(f"{FG_MAGENTA}{s}{RESET}"
+                 for (i, s) in
+                 enumerate(wrap("Hours: " + opening_hours, inner_width)))
 
-    lines.append(f"{FG_MAGENTA}Hours: {opening_hours}{RESET}")
-
-    for segment in address:
-        lines.append(f"{FG_YELLOW}{segment}{RESET}")
+    lines.extend(f"{FG_YELLOW}{s}{RESET}" for s in address)
 
     lines.append("─" * inner_width)
-
     daily_menu = menus.get(restaurant_id, {}).get(menu_date, [])
     if not daily_menu:
         lines.append("No menu today")
@@ -154,8 +152,9 @@ def build_box_lines(restaurant, menus, menu_date, box_width):
         lines.extend(wrapped_title)
 
         if item.get("properties"):
-            props = ", ".join(item["properties"])
-            lines.append(f"{FG_GREEN}({props}){RESET}")
+            props = "(" + ", ".join(item["properties"]) + ")"
+            lines.extend(f"{FG_GREEN}{p}{RESET}" for p in wrap(
+                props, inner_width - 1))
 
         lines.append("")
 
@@ -182,18 +181,19 @@ def print_tiled_boxes(restaurants, menus, menu_date,
     min_spacing = 1
 
     max_columns = max(1, term_width // min_box_width)
-    box_width = max(min_box_width, term_width // max_columns)
+    box_width = min(max(min_box_width, term_width // max_columns), term_width)
     max_spacing = max(min_spacing, (term_width -
                                     box_width * max_columns) // max_columns)
 
-    columns = max(1, term_width // (box_width + max_spacing))
+    boxes_names = [build_box_lines(r, menus, menu_date, box_width)
+                   for r in restaurants]
+
+    columns = min(max(1, term_width // (box_width + max_spacing)),
+                  len(boxes_names))
     spacing = max(min_spacing, (term_width -
                                 box_width * columns) // columns)
     left_spacing = (
         term_width - columns * (box_width + spacing) + spacing) // 2
-
-    boxes_names = [build_box_lines(r, menus, menu_date, box_width)
-                   for r in restaurants]
 
     sorter_lambda, reverse = get_sorter(sorter) or (None, None)
     if sorter_lambda is not None:
@@ -252,9 +252,9 @@ def min_int(arg):
         f = int(arg)
     except ValueError:
         raise argparse.ArgumentTypeError("argument must be an integer value")
-    if f < 30:
+    if f < 10:
         raise argparse.ArgumentTypeError(
-            "argument must be >= 30")
+            "argument must be >= 10")
     return f
 
 
@@ -272,7 +272,7 @@ def main():
         default="fi", nargs="?", type=str, choices=["en", "fi"])
     parser.add_argument(
         '-w', '--width', help="Minimum box width, "
-        "cannot be set below 30",
+        "cannot be set below 10",
         default=35, nargs="?", type=min_int)
     parser.add_argument(
         '-p', '--pager', help="Use the system pager to view the output",
