@@ -59,7 +59,7 @@ def fetch_areas(search):
         [area for area in data if area["id"] in matches]
 
 
-def fetch_restaurants(search, ids):
+def fetch_restaurants(search, ids, open_only):
     response = requests.get(
         f"{restaurants_base_url}"
         f"&ids={",".join(ids)}", timeout=10)
@@ -68,10 +68,14 @@ def fetch_restaurants(search, ids):
     data = response.json()
 
     matches = find_matches(
-        data, search, 0.1, lambda i: i["name"], lambda r: r.get("id", ""))
+        data, search, 0.3, lambda i: i["name"], lambda r: r.get("id", ""))
 
-    return data if len(search) == 0 else \
-        [restaurant for restaurant in data if restaurant["id"] in matches]
+    restaurants = list(filter(is_restaurant_open_now, data)
+                       ) if open_only else data
+
+    return restaurants if len(search) == 0 else \
+        [restaurant for restaurant in restaurants if
+            restaurant["id"] in matches]
 
 
 def fetch_menus(restaurant_ids, menu_date, language):
@@ -267,7 +271,7 @@ def print_tiled_boxes(restaurants, menus, menu_date,
         print()
 
 
-class Capturing(list):
+class capturing(list):
     def __enter__(self):
         self._stdout = sys.stdout
         sys.stdout = self._stringio = StringIO()
@@ -277,6 +281,23 @@ class Capturing(list):
         self.extend(self._stringio.getvalue().splitlines())
         del self._stringio
         sys.stdout = self._stdout
+
+
+class fragile(object):
+    class Break(Exception):
+        """Break out of the with statement"""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __enter__(self):
+        return self.value.__enter__()
+
+    def __exit__(self, etype, value, traceback):
+        error = self.value.__exit__(etype, value, traceback)
+        if etype == self.Break:
+            return True
+        return error
 
 
 def min_int(arg):
@@ -323,6 +344,11 @@ def main():
         help="Display data from specific restaurants only",
         nargs="*", default=[])
     parser.add_argument(
+        '-o', '--open_only',
+        help="Only display restaurants that are open now",
+        action='store_true'
+    )
+    parser.add_argument(
         '-a', '--areas',
         help="What areas to pull menus from",
         nargs="+",
@@ -353,21 +379,24 @@ def main():
 
     areas = fetch_areas(set(args.areas))
     if len(areas) == 0:
-        print("Nothing here but us chickens.")
+        print(f"\t{FG_RED}Nothing here but us chickens.{RESET}")
         exit()
 
-    with Capturing() as output:
+    with fragile(capturing()) as output:
         for area in areas:
             area_restaurant_ids = [str(r) for r in area["restaurants"]]
             restaurants = fetch_restaurants(
-                set(args.restaurants), area_restaurant_ids)
+                set(args.restaurants), area_restaurant_ids, args.open_only)
 
             if len(restaurants) == 0 and len(areas) == 1:
-                print("Nothing here but us chickens.")
-                exit()
+                print(f"\t{FG_RED}Nothing here but us chickens.{RESET}")
+                raise fragile.Break
             elif len(restaurants) == 0:
-                print(f"\t{FG_RED}No restaurants with those names found in {
-                      area["name"]} :|{RESET}")
+                print(f"\t{FG_RED}No restaurants with those names ({
+                    ", ".join(args.restaurants)}){
+                    " or open at this time"
+                    if args.open_only else ""} found in {
+                    area["name"]} ¯\\_(ツ)_/¯{RESET}")
                 continue
             print(f"{BOLD}{FG_BLUE}\tRestaurants in {area["name"]}:{RESET}")
 
