@@ -38,8 +38,8 @@ def find_matches(data, search, threshold, key, to):
             for item in data
             if (similarity := similar(point.lower(), key(item)
                                       .lower())) > threshold
-        ], key=lambda r: r[1], default=({}, None))
-        if item[1] is not None:
+        ], key=lambda r: r[1], default=None)
+        if item is not None:
             matches.add(to(item[0]))
     return matches
 
@@ -171,17 +171,24 @@ def visible_len(s):
 def get_sorter(sorter):
     match sorter:
         case "alpha": return (lambda nm: nm[0], False)
+        case "alpha_r": return (lambda nm: nm[0], True)
         case "len": return (lambda nm: len(nm[1]), True)
+        case "len_r": return (lambda nm: len(nm[1]), False)
         case "none": return None
 
 
 def print_tiled_boxes(restaurants, menus, menu_date,
                       min_box_width, sorter):
     term_width = shutil.get_terminal_size(fallback=(80, 24)).columns
-    min_spacing = 1
+    min_spacing = 2
 
-    max_columns = max(1, term_width // min_box_width)
-    box_width = min(max(min_box_width, term_width // max_columns), term_width)
+    max_columns = max(1, (term_width + min_spacing) //
+                      (min_box_width + min_spacing))
+
+    box_width_fitted = (term_width - min_spacing *
+                        (max_columns - 1)) // max_columns
+    box_width = min(max(min_box_width, (box_width_fitted -
+                    min_box_width) // 4 + min_box_width), term_width)
     max_spacing = max(min_spacing, (term_width -
                                     box_width * max_columns) // max_columns)
 
@@ -192,8 +199,6 @@ def print_tiled_boxes(restaurants, menus, menu_date,
                   len(boxes_names))
     spacing = max(min_spacing, (term_width -
                                 box_width * columns) // columns)
-    left_spacing = (
-        term_width - columns * (box_width + spacing) + spacing) // 2
 
     sorter_lambda, reverse = get_sorter(sorter) or (None, None)
     if sorter_lambda is not None:
@@ -203,6 +208,9 @@ def print_tiled_boxes(restaurants, menus, menu_date,
     rows = [boxes[i:i + columns] for i in range(0, len(boxes), columns)]
 
     for row in rows:
+        left_spacing = (
+            term_width - len(row) * (box_width + spacing) + spacing) // 2
+
         max_height = max(len(box) for box in row)
         padded_boxes = []
         for box in row:
@@ -279,7 +287,7 @@ def main():
         action='store_true')
     parser.add_argument(
         '-s', '--sort', help="Sort the restaurants",
-        choices=["alpha", "none", "len"], default="none")
+        choices=["alpha", "alpha_r", "none", "len", "len_r"], default="none")
     parser.add_argument(
         '-c', '--no_color', help="Disable colored output",
         action='store_true')
