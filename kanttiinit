@@ -177,8 +177,29 @@ def get_sorter(sorter):
         case "none": return None
 
 
+def get_layout(layout):
+    match layout:
+        case "pad": return (True, True)
+        case "align": return (False, True)
+        case "free": return (False, False)
+
+
+def box_content(content: list[str], box_width: int, pad_length: int | None):
+    result = []
+    result.append("┌" + "─" *
+                  (box_width - 2)
+                  + "┐")
+    for line in content:
+        pad = box_width - 2 - visible_len(line)
+        result.append(f"│{line + " " * pad}│")
+    for _ in range(pad_length - len(content) if pad_length else 0):
+        result.append(f"│{" " * (box_width - 2)}│")
+    result.append("└" + "─" * (box_width - 2) + "┘")
+    return result
+
+
 def print_tiled_boxes(restaurants, menus, menu_date,
-                      min_box_width, sorter):
+                      min_box_width, sorter, layout):
     term_width = shutil.get_terminal_size(fallback=(80, 24)).columns
     min_spacing = 2
 
@@ -199,6 +220,8 @@ def print_tiled_boxes(restaurants, menus, menu_date,
                   len(boxes_names))
     spacing = max(min_spacing, (term_width -
                                 box_width * columns) // columns)
+    base_left_spacing = (
+        term_width - columns * (box_width + spacing) + spacing) // 2
 
     sorter_lambda, reverse = get_sorter(sorter) or (None, None)
     if sorter_lambda is not None:
@@ -207,39 +230,40 @@ def print_tiled_boxes(restaurants, menus, menu_date,
     _, boxes = list(zip(*boxes_names))
     rows = [boxes[i:i + columns] for i in range(0, len(boxes), columns)]
 
+    pad_boxes, align = get_layout(layout)
+
+    if not pad_boxes and not align:
+        result = [[""] for _ in range(columns)]
+        for row in rows:
+            for i, box in enumerate(row):
+                boxed = box_content(box, box_width, None)
+                result[i].extend(boxed)
+                result[i].append(" " * box_width)
+
+        rows = [result]
+
     for row in rows:
         left_spacing = (
-            term_width - len(row) * (box_width + spacing) + spacing) // 2
+            (term_width - len(row) * (box_width + spacing) + spacing) // 2
+            if align else base_left_spacing)
 
-        max_height = max(len(box) for box in row)
-        padded_boxes = []
-        for box in row:
-            pad_lines = max_height - len(box)
-            padded_box = box + [""] * pad_lines
-            padded_boxes.append(padded_box)
+        max_content_height = max(len(box) for box in row)
 
-        top_border = (" " * spacing).join("┌" + "─" *
-                                                (box_width - 2)
-                                          + "┐" for _ in padded_boxes)
-
-        print(" " * left_spacing, end="")
-        print(top_border)
-
-        for i in range(max_height):
+        for i in range(max_content_height + 2):
             line_parts = []
-            for box in padded_boxes:
+            for box in row:
+                box = box_content(
+                    box, box_width,
+                    max_content_height if pad_boxes else None) \
+                    if align else box
+                if i >= len(box):
+                    line_parts.append(" " * box_width)
+                    continue
                 content = box[i]
-                pad = box_width - 2 - visible_len(content)
-                content = content + " " * pad
-                line_parts.append(f"│{content}│")
+                line_parts.append(content)
             print(" " * left_spacing, end="")
             print((" " * spacing).join(line_parts))
 
-        print(" " * left_spacing, end="")
-        bottom_border = (" " * spacing).join("└" + "─" *
-                                                   (box_width - 2)
-                                             + "┘" for _ in padded_boxes)
-        print(bottom_border)
         print()
 
 
@@ -283,6 +307,9 @@ def main():
         "cannot be set below 10",
         default=35, nargs="?", type=min_int)
     parser.add_argument(
+        '-t', '--layout', help="Set the content layout style",
+        default="free", nargs="?", type=str, choices=["free", "pad", "align"])
+    parser.add_argument(
         '-p', '--pager', help="Use the system pager to view the output",
         action='store_true')
     parser.add_argument(
@@ -300,6 +327,7 @@ def main():
         help="What areas to pull menus from",
         nargs="+",
         default=["Otaniemi"])
+
     args = parser.parse_args()
 
     if args.no_color:  # this is kinda evil, but simple
@@ -347,7 +375,7 @@ def main():
             menus = fetch_menus(restaurant_ids, today, args.lang)
 
             print_tiled_boxes(restaurants, menus, today,
-                              args.width, args.sort)
+                              args.width, args.sort, args.layout)
 
     if args.pager:
         pydoc.pager("\n".join(output))
